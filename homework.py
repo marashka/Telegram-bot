@@ -9,7 +9,10 @@ from dotenv import load_dotenv
 from telegram import Bot
 
 from exceptions import (InvalidTokenError, WrongArrayTypeError,
-                        WrongStausCodeError)
+                        WrongStausCodeError, MessageSendError,
+                        ApiConnectionError, GetApiAnswerError, ApiJsonError,
+                        CheckResponseError, ApiResponseKeyError)
+
 
 load_dotenv()
 
@@ -28,9 +31,9 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 RETRY_TIME = 600
+RETRY_TTIME_MIN = RETRY_TIME / 60
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
-
 
 HOMEWORK_STATUSES = {
     'approved': 'Работа проверена: ревьюеру всё понравилось. Ура!',
@@ -46,7 +49,7 @@ def send_message(bot, message):
         logger.info('Сообщение отправлено в телеграмм!')
     except Exception as error:
         logger.exception(f'Сообщение не отправлено: {error}')
-        raise
+        raise MessageSendError from error
 
 
 def get_api_answer(current_timestamp):
@@ -63,126 +66,124 @@ def get_api_answer(current_timestamp):
             headers=HEADERS,
             params=params
         )
-    except requests.exceptions.ConnectionError:
-        logger.exception(
-            'Ошибка во время соединения с API, '
-            'проверьте подключение к интернету'
-        )
-        raise
-    except Exception:
-        logger.exception('Непредвиденная ошибка во время соеденения с API')
-        raise
-    status_code = homework_statuses.status_code
-    try:
-        assert status_code == HTTPStatus.OK
+    except requests.exceptions.ConnectionError as error:
+        raise ApiConnectionError from error
     except Exception as error:
-        logger.exception('Код ответа API != 200')
-        raise WrongStausCodeError(status_code) from error
+        logger.exception(f'Ошибка при запросе к API: {error}')
+        raise GetApiAnswerError from error
+    status_code = homework_statuses.status_code
+    if status_code != HTTPStatus.OK:
+        raise WrongStausCodeError(status_code)
     try:
         return homework_statuses.json()
-    except json.JSONDecodeError:
-        logger.exception(
-            'Ошибка во время преобразования ответа API к формату JSON'
-        )
-        raise
+    except json.JSONDecodeError as error:
+        raise ApiJsonError from error
 
 
 def check_response(response):
     """Проверяет ответ API на корректность.
+
     В качестве параметра функция получает ответ API,
     приведенный к типам данных Python. Если ответ API соответствует
     ожиданиям, то функция должна вернуть список домашних работ
     (он может быть и пустым), доступный в ответе API по ключу 'homeworks'.
     """
+    logger.info('Проверяем ответ API на корректность')
     try:
         homework_key = 'homeworks'
-        homework = response[homework_key]
-    except KeyError:
-        logger.exception(f'В ответе API отсутствует ключ {homework_key}')
-        raise
-    try:
-        expected_type = list
-        assert isinstance(homework, expected_type)
+        homeworks = response[homework_key]
+        response['current_date']
+    # Когда перевожу TypeError на кастомное исключение, то тесты
+    # почему-то не пропускают, поэтому оставил так...
+    # пишет "test_check_response_not_dict FAILED", наверное,
+    # в test_bot.py в 536 строке должно быть просто except, как
+    # и в аналогичном тесте test_check_response_not_list (576 строка)
+    except TypeError:
+        raise TypeError(
+            f'Неподходящий тип данных: ожидался - {dict}, '
+            f'поступил - {type(response)}'
+        )
+    except KeyError as error:
+        raise ApiResponseKeyError from error
     except Exception as error:
-        logger.exception('Некорректный тип данных')
-        raise WrongArrayTypeError(expected_type, type(homework)) from error
+        logger.exception(f'Ошибка при проверке ответа API: {error}')
+        raise CheckResponseError from error
+    if type(homeworks) is not list:
+        raise WrongArrayTypeError(list, type(homeworks))
     logger.info('Получен список домашних работ')
-    return homework
+    return homeworks
 
 
 def parse_status(homework):
     """Извлекает из информации о конкретной домашней работе статус этой работы.
+
     В качестве параметра функция получает только один элемент из списка
     домашних работ. В случае успеха, функция возвращает подготовленную для
     отправки в Telegram строку, содержащую один из вердиктов словаря
     HOMEWORK_STATUSES.
     """
     try:
-        homework_name_key = 'homework_name'
-        homework_name = homework[homework_name_key]
+        homework_name = homework['homework_name']
+        status = homework['status']
+    # Здесь я аналогично не смог перевести на кастомное исключение,
+    # тесты ругаются...
     except KeyError:
-        logger.exception(
-            f'Невозможно получить имя домашней работы '
-            f'по ключу {homework_name_key}'
-        )
-        raise
-    status = homework.get('status')
+        raise KeyError('Ключи в ответе API не соответствуют ожиданиям')
     try:
         verdict = HOMEWORK_STATUSES[status]
+        return f'Изменился статус проверки работы "{homework_name}". {verdict}'
+    # И здесь
     except KeyError:
-        logger.exception(
-            f'Обнаружен незадокументированный статус '
-            f'домашней работы 'f'- {status}.'
+        raise KeyError(
+            'Обнаружен незадокументированный статус '
+            f'домашней работы - {status}'
         )
-        raise
-    return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
 def check_tokens():
     """Проверяет доступность переменных окружения, необходимых для работы.
+
     Если отсутствует хотя бы одна переменная окружения — функция
     должна вернуть False, иначе — True.
     """
-    return all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID])
+    return all((PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID))
 
 
 def main():
     """Основная логика работы бота."""
+    if not check_tokens():
+        raise InvalidTokenError
     bot = Bot(token=TELEGRAM_TOKEN)
-    send_message(
-        bot,
-        'Привет, Я заступил в дежурство, с этого момента '
-        'я начинаю отслеживать все новые статусы домашних работ, '
-        'если что-нибудь появится, я обязательно тебе сообщу!'
-    )
     current_timestamp = int(time.time())
+    cash_status_hw_message = ''
+    cash_error_message = ''
     while True:
-        try:
-            assert check_tokens()
-        except AssertionError as error:
-            logger.exception(
-                'Проблема при получении токенов'
-            )
-            raise InvalidTokenError from error
         try:
             response = get_api_answer(current_timestamp)
             homework = check_response(response)
             if homework:
-                message = parse_status(homework[0])
-                logger.info(
-                    'Изменился статус проверки домашней работы'
-                )
-                send_message(bot, message)
-                current_timestamp = int(time.time())
+                status_hw_message = parse_status(homework[0])
+                if status_hw_message != cash_status_hw_message:
+                    logger.info(
+                        'Изменился статус проверки домашней работы'
+                    )
+                    send_message(bot, status_hw_message)
+                    current_timestamp = response.get(
+                        'current_date',
+                        current_timestamp
+                    )
+                    cash_status_hw_message = status_hw_message
             else:
                 logger.info(
-                    f'Статус проверки домашней работы не изменился, '
-                    f'следубщий запрос через {RETRY_TIME/60} мин'
+                    'Статус проверки домашней работы не изменился, '
+                    f'следубщий запрос через {RETRY_TTIME_MIN} мин'
                 )
         except Exception as error:
-            message = f'Ошибка во время работы бота {error}'
-            logger.exception(message)
-            send_message(bot, message)
+            error_message = f'Ошибка во время работы бота: {error}'
+            logger.exception(error_message)
+            if cash_error_message != error_message:
+                send_message(bot, error_message)
+                cash_error_message = error_message
         finally:
             time.sleep(RETRY_TIME)
 
