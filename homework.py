@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import sys
 import time
 from http import HTTPStatus
 
@@ -8,11 +9,10 @@ import requests
 from dotenv import load_dotenv
 from telegram import Bot
 
-from exceptions import (InvalidTokenError, WrongArrayTypeError,
-                        WrongStausCodeError, MessageSendError,
-                        ApiConnectionError, GetApiAnswerError, ApiJsonError,
-                        CheckResponseError, ApiResponseKeyError)
-
+from exceptions import (ApiConnectionError, ApiJsonError, ApiResponseKeyError,
+                        CheckResponseError, GetApiAnswerError,
+                        InvalidTokenError, MessageSendError,
+                        WrongArrayTypeError, WrongStausCodeError)
 
 load_dotenv()
 
@@ -48,12 +48,12 @@ def send_message(bot, message):
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
         logger.info('Сообщение отправлено в телеграмм!')
     except Exception as error:
-        logger.exception(f'Сообщение не отправлено: {error}')
         raise MessageSendError from error
 
 
 def get_api_answer(current_timestamp):
     """Делает запрос к единственному эндпоинту API-сервиса.
+
     В качестве параметра функция получает временную метку.
     В случае успешного запроса должна вернуть ответ API,
     преобразовав его из формата JSON к типам данных Python.
@@ -69,7 +69,6 @@ def get_api_answer(current_timestamp):
     except requests.exceptions.ConnectionError as error:
         raise ApiConnectionError from error
     except Exception as error:
-        logger.exception(f'Ошибка при запросе к API: {error}')
         raise GetApiAnswerError from error
     status_code = homework_statuses.status_code
     if status_code != HTTPStatus.OK:
@@ -92,7 +91,8 @@ def check_response(response):
     try:
         homework_key = 'homeworks'
         homeworks = response[homework_key]
-        response['current_date']
+        if 'current_date' not in response:
+            raise KeyError
     # Когда перевожу TypeError на кастомное исключение, то тесты
     # почему-то не пропускают, поэтому оставил так...
     # пишет "test_check_response_not_dict FAILED", наверное,
@@ -106,7 +106,6 @@ def check_response(response):
     except KeyError as error:
         raise ApiResponseKeyError from error
     except Exception as error:
-        logger.exception(f'Ошибка при проверке ответа API: {error}')
         raise CheckResponseError from error
     if type(homeworks) is not list:
         raise WrongArrayTypeError(list, type(homeworks))
@@ -152,31 +151,31 @@ def check_tokens():
 def main():
     """Основная логика работы бота."""
     if not check_tokens():
-        raise InvalidTokenError
+        sys.exit(InvalidTokenError())
     bot = Bot(token=TELEGRAM_TOKEN)
     current_timestamp = int(time.time())
-    cash_status_hw_message = ''
+    cash_status_homework_message = ''
     cash_error_message = ''
     while True:
         try:
             response = get_api_answer(current_timestamp)
             homework = check_response(response)
+            current_timestamp = response.get(
+                'current_date',
+                int(time.time())
+            )
             if homework:
-                status_hw_message = parse_status(homework[0])
-                if status_hw_message != cash_status_hw_message:
+                status_homework_message = parse_status(homework[0])
+                if status_homework_message != cash_status_homework_message:
                     logger.info(
                         'Изменился статус проверки домашней работы'
                     )
-                    send_message(bot, status_hw_message)
-                    current_timestamp = response.get(
-                        'current_date',
-                        current_timestamp
-                    )
-                    cash_status_hw_message = status_hw_message
+                    send_message(bot, status_homework_message)
+                    cash_status_homework_message = status_homework_message
             else:
                 logger.info(
                     'Статус проверки домашней работы не изменился, '
-                    f'следубщий запрос через {RETRY_TTIME_MIN} мин'
+                    f'следующий запрос через {RETRY_TTIME_MIN} мин'
                 )
         except Exception as error:
             error_message = f'Ошибка во время работы бота: {error}'
